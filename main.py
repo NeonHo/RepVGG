@@ -82,7 +82,32 @@ def main(config):
 
     logger.info(str(model))
     model.cuda()
+    
+    if config.TRAIN.AUTO_RESUME:
+        resume_file = auto_resume_helper(config.OUTPUT)
+        if resume_file:
+            if config.MODEL.RESUME:
+                logger.warning(f"auto-resume changing resume file from {config.MODEL.RESUME} to {resume_file}")
+            config.defrost()
+            config.MODEL.RESUME = resume_file
+            config.freeze()
+            logger.info(f'auto resuming from {resume_file}')
+        else:
+            logger.info(f'no checkpoint found in {config.OUTPUT}, ignoring auto resume')
 
+    lr_scheduler = build_scheduler(config, optimizer, len(data_loader_train))
+    if config.TRAIN.EMA_ALPHA > 0 and (not config.EVAL_MODE) and (not config.THROUGHPUT_MODE):
+        model_ema = copy.deepcopy(model)
+    else:
+        model_ema = None
+    if (not config.THROUGHPUT_MODE) and config.MODEL.RESUME:
+        max_accuracy = load_checkpoint(config, model, optimizer, lr_scheduler, logger, model_ema=model_ema)
+        
+    for module in model.modules():
+        if hasattr(module, 'switch_to_deploy'):
+            module.switch_to_deploy()
+
+    
     if torch.cuda.device_count() > 1:
         if config.AMP_OPT_LEVEL != "O0":
             model, optimizer = amp.initialize(model, optimizer, opt_level=config.AMP_OPT_LEVEL)
@@ -110,7 +135,6 @@ def main(config):
         logger.info(f"Only eval. top-1 acc, top-5 acc, loss: {acc1:.3f}, {acc5:.3f}, {loss:.5f}")
         return
 
-    lr_scheduler = build_scheduler(config, optimizer, len(data_loader_train))
 
     if config.AUG.MIXUP > 0.:
         # smoothing is handled with mixup label transform
@@ -123,28 +147,6 @@ def main(config):
     max_accuracy = 0.0
     max_ema_accuracy = 0.0
 
-    if config.TRAIN.EMA_ALPHA > 0 and (not config.EVAL_MODE) and (not config.THROUGHPUT_MODE):
-        model_ema = copy.deepcopy(model)
-    else:
-        model_ema = None
-
-    if config.TRAIN.AUTO_RESUME:
-        resume_file = auto_resume_helper(config.OUTPUT)
-        if resume_file:
-            if config.MODEL.RESUME:
-                logger.warning(f"auto-resume changing resume file from {config.MODEL.RESUME} to {resume_file}")
-            config.defrost()
-            config.MODEL.RESUME = resume_file
-            config.freeze()
-            logger.info(f'auto resuming from {resume_file}')
-        else:
-            logger.info(f'no checkpoint found in {config.OUTPUT}, ignoring auto resume')
-
-    if (not config.THROUGHPUT_MODE) and config.MODEL.RESUME:
-        max_accuracy = load_checkpoint(config, model_without_ddp, optimizer, lr_scheduler, logger, model_ema=model_ema)
-    for module in model.modules():
-        if hasattr(module, 'switch_to_deploy'):
-            module.switch_to_deploy()
 
 
     logger.info("Start training")
