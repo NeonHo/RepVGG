@@ -194,6 +194,8 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
     batch_time = AverageMeter()
     loss_meter = AverageMeter()
     norm_meter = AverageMeter()
+    acc1_meter = AverageMeter()
+    acc5_meter = AverageMeter()
 
     start = time.time()
     end = time.time()
@@ -215,6 +217,8 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
                     loss += criterion(pred, targets)
         else:
             loss = criterion(outputs, targets)
+            
+        acc1, acc5 = accuracy(outputs, targets, topk=(1, 5))
 
         if config.TRAIN.ACCUMULATION_STEPS > 1:
 
@@ -260,6 +264,8 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
 
         loss_meter.update(loss.item(), targets.size(0))
         norm_meter.update(grad_norm)
+        acc1_meter.update(acc1.item(), targets.size(0))
+        acc5_meter.update(acc5.item(), targets.size(0))
         batch_time.update(time.time() - end)
 
         if model_ema is not None:
@@ -277,6 +283,8 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
                 f'time {batch_time.val:.4f} ({batch_time.avg:.4f})\t'
                 f'loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t'
                 f'grad_norm {norm_meter.val:.4f} ({norm_meter.avg:.4f})\t'
+                f'Acc@1 {acc1_meter.val:.3f} ({acc1_meter.avg:.3f})\t'
+                f'Acc@5 {acc5_meter.val:.3f} ({acc5_meter.avg:.3f})\t'
                 f'mem {memory_used:.0f}MB')
     epoch_time = time.time() - start
     logger.info(f"EPOCH {epoch} training takes {datetime.timedelta(seconds=int(epoch_time))}")

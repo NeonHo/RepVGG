@@ -1,2 +1,10 @@
 .idea/
 *nori*
+datasets
+ckpt_dir
+
+__pycache__/*.pyc
+data/__pycache__/*.pyc
+train/__pycache__/*.pyc
+datasets/
+ckpt_dir/

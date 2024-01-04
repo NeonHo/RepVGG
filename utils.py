@@ -126,23 +126,23 @@ def load_checkpoint(config, model, optimizer, lr_scheduler, logger, model_ema=No
             config.MODEL.RESUME, map_location='cpu', check_hash=True)
     else:
         checkpoint = torch.load(config.MODEL.RESUME, map_location='cpu')
-    msg = model.load_state_dict(checkpoint['model'], strict=False)
+    msg = model.load_state_dict(checkpoint, strict=False)
     logger.info(msg)
     max_accuracy = 0.0
-    if not config.EVAL_MODE and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-        config.defrost()
-        config.TRAIN.START_EPOCH = checkpoint['epoch'] + 1
-        config.freeze()
-        if 'amp' in checkpoint and config.AMP_OPT_LEVEL != "O0" and checkpoint['config'].AMP_OPT_LEVEL != "O0":
-            amp.load_state_dict(checkpoint['amp'])
-        logger.info(f"=> loaded successfully '{config.MODEL.RESUME}' (epoch {checkpoint['epoch']})")
-        if 'max_accuracy' in checkpoint:
-            max_accuracy = checkpoint['max_accuracy']
-    if model_ema is not None:
-        unwrap_model(model_ema).load_state_dict(checkpoint['ema'])
-        print('=================================================== EMAloaded')
+    # if not config.EVAL_MODE and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
+    #     optimizer.load_state_dict(checkpoint['optimizer'])
+    #     lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+    #     config.defrost()
+    #     config.TRAIN.START_EPOCH = checkpoint['epoch'] + 1
+    #     config.freeze()
+    #     if 'amp' in checkpoint and config.AMP_OPT_LEVEL != "O0" and checkpoint['config'].AMP_OPT_LEVEL != "O0":
+    #         amp.load_state_dict(checkpoint['amp'])
+    #     logger.info(f"=> loaded successfully '{config.MODEL.RESUME}' (epoch {checkpoint['epoch']})")
+    #     if 'max_accuracy' in checkpoint:
+    #         max_accuracy = checkpoint['max_accuracy']
+    # if model_ema is not None:
+    #     unwrap_model(model_ema).load_state_dict(checkpoint['ema'])
+    #     print('=================================================== EMAloaded')
 
     del checkpoint
     torch.cuda.empty_cache()
