@@ -21,6 +21,7 @@ from utils import load_checkpoint, load_weights, save_checkpoint, get_grad_norm,
 import copy
 from train.optimizer import build_optimizer
 from repvggplus import create_RepVGGplus_by_name
+from hmquant.qat_torch.apis import trace_model_for_qat
 
 try:
     # noinspection PyUnresolvedReferences
@@ -107,6 +108,13 @@ def main(config):
         if hasattr(module, 'switch_to_deploy'):
             module.switch_to_deploy()
 
+    # QAT
+    quant_cfg = dict(
+        global_wise_cfg=dict(
+            o_cfg=dict(calib_metric="percent-0.99999"), freeze_bn=True
+        )
+    )
+    model = trace_model_for_qat(copy.deepcopy(model.train()), quant_cfg, domain="xh2")
     
     if torch.cuda.device_count() > 1:
         if config.AMP_OPT_LEVEL != "O0":
