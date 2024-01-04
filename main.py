@@ -17,7 +17,7 @@ from train.config import get_config
 from data import build_loader
 from train.lr_scheduler import build_scheduler
 from train.logger import create_logger
-from utils import load_checkpoint, save_checkpoint, get_grad_norm, auto_resume_helper, reduce_tensor, save_latest, update_model_ema, unwrap_model
+from utils import load_checkpoint, load_weights, save_checkpoint, get_grad_norm, auto_resume_helper, reduce_tensor, save_latest, update_model_ema, unwrap_model
 import copy
 from train.optimizer import build_optimizer
 from repvggplus import create_RepVGGplus_by_name
@@ -87,7 +87,7 @@ def main(config):
         if config.AMP_OPT_LEVEL != "O0":
             model, optimizer = amp.initialize(model, optimizer, opt_level=config.AMP_OPT_LEVEL)
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[config.LOCAL_RANK],
-                                                          broadcast_buffers=False)
+                                                          broadcast_buffers=False, find_unused_parameters=True)
         model_without_ddp = model.module
     else:
         if config.AMP_OPT_LEVEL != "O0":
@@ -142,6 +142,9 @@ def main(config):
 
     if (not config.THROUGHPUT_MODE) and config.MODEL.RESUME:
         max_accuracy = load_checkpoint(config, model_without_ddp, optimizer, lr_scheduler, logger, model_ema=model_ema)
+    for module in model.modules():
+        if hasattr(module, 'switch_to_deploy'):
+            module.switch_to_deploy()
 
 
     logger.info("Start training")
