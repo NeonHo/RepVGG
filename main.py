@@ -104,17 +104,17 @@ def main(config):
     if (not config.THROUGHPUT_MODE) and config.MODEL.RESUME:
         max_accuracy = load_checkpoint(config, model, optimizer, lr_scheduler, logger, model_ema=model_ema)
         
-    for module in model.modules():
-        if hasattr(module, 'switch_to_deploy'):
-            module.switch_to_deploy()
+    # for module in model.modules():
+    #     if hasattr(module, 'switch_to_deploy'):
+    #         module.switch_to_deploy()
 
     # QAT
-    quant_cfg = dict(
-        global_wise_cfg=dict(
-            o_cfg=dict(calib_metric="percent-0.99999"), freeze_bn=True
-        )
-    )
-    model = trace_model_for_qat(copy.deepcopy(model.train()), quant_cfg, domain="xh2")
+    # quant_cfg = dict(
+    #     global_wise_cfg=dict(
+    #         o_cfg=dict(calib_metric="percent-0.99999"), freeze_bn=True
+    #     )
+    # )
+    # model = trace_model_for_qat(copy.deepcopy(model.train()), quant_cfg, domain="xh2")
     
     if torch.cuda.device_count() > 1:
         if config.AMP_OPT_LEVEL != "O0":

@@ -20,11 +20,19 @@ def conv_bn(in_channels, out_channels, kernel_size, stride, padding, groups=1):
 class RepVGGBlock(nn.Module):
 
     def __init__(self, in_channels, out_channels, kernel_size,
-                 stride=1, padding=0, dilation=1, groups=1, padding_mode='zeros', deploy=False, use_se=False):
+                 stride=1, padding=0, dilation=1, groups=1, padding_mode='zeros', deploy=False, use_se=False, quantize=False, BNEst=False):
         super(RepVGGBlock, self).__init__()
         self.deploy = deploy
         self.groups = groups
         self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        self.dilation = dilation
+        self.padding_mode = padding_mode
+        self.quantize = quantize
+        self.BNEst = BNEst
 
         assert kernel_size == 3
         assert padding == 1
@@ -53,11 +61,14 @@ class RepVGGBlock(nn.Module):
     def forward(self, inputs):
         if hasattr(self, 'rbr_reparam'):
             return self.nonlinearity(self.se(self.rbr_reparam(inputs)))
-
-        if self.rbr_identity is None:
-            id_out = 0
+        if self.quantize:
+            kernel, bias = self.construct_kernel(inputs)
+            return self.nonlinearity(self.se(nn.functional.conv2d(input=inputs, weight=kernel, bias=bias, stride=self.stride, padding=self.padding, dilation=self.dilation, groups=self.groups)))
         else:
-            id_out = self.rbr_identity(inputs)
+            if self.rbr_identity is None:
+                id_out = 0
+            else:
+                id_out = self.rbr_identity(inputs)
 
         return self.nonlinearity(self.se(self.rbr_dense(inputs) + self.rbr_1x1(inputs) + id_out))
 
@@ -144,11 +155,63 @@ class RepVGGBlock(nn.Module):
             self.__delattr__('id_tensor')
         self.deploy = True
 
+    def BN_stats(self, x: torch.Tensor, branch: nn.Module):
+        if self.BNEst:
+            return BNEst_func(x, branch)
+        else:
+            return BN_func(x, branch)
+
+    def construct_kernel(self, x: torch.Tensor):
+        rbr_dense_BN_stas = self.BN_stats(x=x, branch=self.rbr_dense)  # 先做一次Conv+BN, 让BN中的running mean running variance更新.
+        rbr_dense_weight, rbr_dense_bias = fuse_BN(self.rbr_dense.conv, rbr_dense_BN_stas, self.rbr_dense.bn, groups=self.groups)
+        rbr_1x1_BN_stas = self.BN_stats(x=x, branch=self.rbr_1x1)  # 先做一次Conv+BN, 让BN中的running mean running variance更新.
+        rbr_1x1_weight, rbr_1x1_bias = fuse_BN(self.rbr_1x1.conv, rbr_1x1_BN_stas, self.rbr_1x1.bn, groups=self.groups)
+        if hasattr(self, 'rbr_identity') and self.rbr_identity is not None:
+            rbr_identity_BN_stas = self.BN_stats(x=x, branch=self.rbr_identity)
+            rbr_identity_weight, rbr_identity_bias = fuse_BN(None, rbr_identity_BN_stas, self.rbr_identity, groups=self.groups)
+            return rbr_dense_weight + self._pad_1x1_to_3x3_tensor(rbr_1x1_weight) + rbr_identity_weight, rbr_dense_bias + rbr_1x1_bias + rbr_identity_bias
+        else:
+            return rbr_dense_weight + self._pad_1x1_to_3x3_tensor(rbr_1x1_weight), rbr_dense_bias + rbr_1x1_bias
+
+def BNEst_func(x: torch.Tensor, conv: nn.Module):
+    pass
+
+@torch.no_grad()
+def BN_func(x: torch.Tensor, module: nn.Module):
+    module(x)
+    if isinstance(module, nn.BatchNorm2d):
+        mean_value = module.running_mean
+        variance_value = module.running_var
+    else:
+        mean_value = module.bn.running_mean
+        variance_value = module.bn.running_var
+    return {"mean": mean_value.detach(), "var": variance_value.detach()}
+
+def fuse_BN(conv: nn.Conv2d, BN_stats: dict, BN_module: nn.BatchNorm2d, groups: int):
+    mean_tensor = BN_stats["mean"]
+    var_tensor = BN_stats["var"]
+    gamma = BN_module.weight
+    beta = BN_module.bias
+    eps = BN_module.eps
+    if conv is None:
+        input_dim = BN_module.num_features // groups
+        kernel_value = np.zeros((BN_module.num_features, input_dim, 3, 3), dtype=np.float32)
+        for i in range(BN_module.num_features):
+            kernel_value[i, i % input_dim, 1, 1] = 1
+        id_tensor = torch.from_numpy(kernel_value).to(BN_module.weight.device)
+        kernel = id_tensor
+    else:
+        kernel = conv.weight
+        
+    std = (var_tensor + eps).sqrt()
+    t = (gamma / std).reshape(-1, 1, 1, 1)
+        
+    return kernel * t, beta - mean_tensor * gamma / std
 
 
 class RepVGG(nn.Module):
 
-    def __init__(self, num_blocks, num_classes=1000, width_multiplier=None, override_groups_map=None, deploy=False, use_se=False, use_checkpoint=False):
+    def __init__(self, num_blocks, num_classes=1000, width_multiplier=None, override_groups_map=None, deploy=False, use_se=False, use_checkpoint=False, quantize=True):
         super(RepVGG, self).__init__()
         assert len(width_multiplier) == 4
         self.deploy = deploy
@@ -158,22 +221,22 @@ class RepVGG(nn.Module):
         self.use_checkpoint = use_checkpoint
 
         self.in_planes = min(64, int(64 * width_multiplier[0]))
-        self.stage0 = RepVGGBlock(in_channels=3, out_channels=self.in_planes, kernel_size=3, stride=2, padding=1, deploy=self.deploy, use_se=self.use_se)
+        self.stage0 = RepVGGBlock(in_channels=3, out_channels=self.in_planes, kernel_size=3, stride=2, padding=1, deploy=self.deploy, use_se=self.use_se, quantize=quantize)
         self.cur_layer_idx = 1
-        self.stage1 = self._make_stage(int(64 * width_multiplier[0]), num_blocks[0], stride=2)
-        self.stage2 = self._make_stage(int(128 * width_multiplier[1]), num_blocks[1], stride=2)
-        self.stage3 = self._make_stage(int(256 * width_multiplier[2]), num_blocks[2], stride=2)
-        self.stage4 = self._make_stage(int(512 * width_multiplier[3]), num_blocks[3], stride=2)
+        self.stage1 = self._make_stage(int(64 * width_multiplier[0]), num_blocks[0], stride=2, quantize=quantize)
+        self.stage2 = self._make_stage(int(128 * width_multiplier[1]), num_blocks[1], stride=2, quantize=quantize)
+        self.stage3 = self._make_stage(int(256 * width_multiplier[2]), num_blocks[2], stride=2, quantize=quantize)
+        self.stage4 = self._make_stage(int(512 * width_multiplier[3]), num_blocks[3], stride=2, quantize=quantize)
         self.gap = nn.AdaptiveAvgPool2d(output_size=1)
         self.linear = nn.Linear(int(512 * width_multiplier[3]), num_classes)
 
-    def _make_stage(self, planes, num_blocks, stride):
+    def _make_stage(self, planes, num_blocks, stride, quantize=False):
         strides = [stride] + [1]*(num_blocks-1)
         blocks = []
         for stride in strides:
             cur_groups = self.override_groups_map.get(self.cur_layer_idx, 1)
             blocks.append(RepVGGBlock(in_channels=self.in_planes, out_channels=planes, kernel_size=3,
-                                      stride=stride, padding=1, groups=cur_groups, deploy=self.deploy, use_se=self.use_se))
+                                      stride=stride, padding=1, groups=cur_groups, deploy=self.deploy, use_se=self.use_se, quantize=quantize))
             self.in_planes = planes
             self.cur_layer_idx += 1
         return nn.ModuleList(blocks)
