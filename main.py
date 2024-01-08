@@ -111,9 +111,9 @@ def main(config):
     # QAT
     quant_cfg = dict(
         global_wise_cfg=dict(
-            o_cfg=dict(calib_metric="minmax", dtype="int8", use_grad_scale=False), 
+            # o_cfg=dict(calib_metric="minmax", dtype="int8", use_grad_scale=False), 
             # o_cfg=dict(calib_metric="percent-0.99999", dtype="int8"), 
-            # o_cfg=dict(calib_metric="KL", dtype="int8"), 
+            o_cfg=dict(calib_metric="KL", dtype="int8", use_grad_scale=False), 
             freeze_bn=False,
             w_cfg=dict(dtype="int8", use_grad_scale=False)
             # w_cfg=dict(dtype="int8")
