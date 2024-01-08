@@ -9,6 +9,7 @@ import torch
 import copy
 from se_block import SEBlock
 import torch.utils.checkpoint as checkpoint
+from hmquant.utils.fx import wrap
 
 def conv_bn(in_channels, out_channels, kernel_size, stride, padding, groups=1):
     result = nn.Sequential()
@@ -17,6 +18,7 @@ def conv_bn(in_channels, out_channels, kernel_size, stride, padding, groups=1):
     result.add_module('bn', nn.BatchNorm2d(num_features=out_channels))
     return result
 
+@wrap
 class RepVGGBlock(nn.Module):
 
     def __init__(self, in_channels, out_channels, kernel_size,
@@ -121,7 +123,7 @@ class RepVGGBlock(nn.Module):
             beta = branch.bn.bias
             eps = branch.bn.eps
         else:
-            assert isinstance(branch, nn.BatchNorm2d)
+            assert isinstance(branch, nn.BatchNorm2d) or isinstance(branch, nn.SyncBatchNorm)
             if not hasattr(self, 'id_tensor'):
                 input_dim = self.in_channels // self.groups
                 kernel_value = np.zeros((self.in_channels, input_dim, 3, 3), dtype=np.float32)
@@ -179,7 +181,7 @@ def BNEst_func(x: torch.Tensor, conv: nn.Module):
 @torch.no_grad()
 def BN_func(x: torch.Tensor, module: nn.Module):
     module(x)
-    if isinstance(module, nn.BatchNorm2d):
+    if isinstance(module, nn.BatchNorm2d) or isinstance(module, nn.SyncBatchNorm):
         mean_value = module.running_mean
         variance_value = module.running_var
     else:

@@ -109,12 +109,18 @@ def main(config):
     #         module.switch_to_deploy()
 
     # QAT
-    # quant_cfg = dict(
-    #     global_wise_cfg=dict(
-    #         o_cfg=dict(calib_metric="percent-0.99999"), freeze_bn=True
-    #     )
-    # )
-    # model = trace_model_for_qat(copy.deepcopy(model.train()), quant_cfg, domain="xh2")
+    quant_cfg = dict(
+        global_wise_cfg=dict(
+            o_cfg=dict(calib_metric="minmax", dtype="int8", use_grad_scale=False), 
+            # o_cfg=dict(calib_metric="percent-0.99999", dtype="int8"), 
+            # o_cfg=dict(calib_metric="KL", dtype="int8"), 
+            freeze_bn=False,
+            w_cfg=dict(dtype="int8", use_grad_scale=False)
+            # w_cfg=dict(dtype="int8")
+        )
+    )
+    model = trace_model_for_qat(copy.deepcopy(model.train()), quant_cfg, domain="xh2")
+    model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(module=model)
     
     if torch.cuda.device_count() > 1:
         if config.AMP_OPT_LEVEL != "O0":
