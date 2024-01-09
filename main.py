@@ -111,11 +111,11 @@ def main(config):
     # QAT
     quant_cfg = dict(
         global_wise_cfg=dict(
-            # o_cfg=dict(calib_metric="minmax", dtype="int8", use_grad_scale=False), 
+            o_cfg=dict(calib_metric="minmax", dtype="int8", use_grad_scale=False), 
             # o_cfg=dict(calib_metric="percent-0.99999", dtype="int8"), 
-            o_cfg=dict(calib_metric="KL", dtype="int8", use_grad_scale=False), 
+            # o_cfg=dict(calib_metric="KL", dtype="int8", use_grad_scale=False), 
             freeze_bn=False,
-            w_cfg=dict(dtype="int8", use_grad_scale=False)
+            w_cfg=dict(calib_metric="minmax", dtype="int8", use_grad_scale=False)
             # w_cfg=dict(dtype="int8")
         )
     )
@@ -174,7 +174,7 @@ def main(config):
             if epoch % config.SAVE_FREQ == 0:
                 save_checkpoint(config, epoch, model_without_ddp, max_accuracy, optimizer, lr_scheduler, logger, model_ema=model_ema)
 
-        if epoch % config.SAVE_FREQ == 0 or epoch >= (config.TRAIN.EPOCHS - 10):
+        if epoch % config.SAVE_FREQ == 0:
 
             if data_loader_val is not None:
                 acc1, acc5, loss = validate(config, data_loader_val, model)
@@ -305,6 +305,8 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
                 f'Acc@1 {acc1_meter.val:.3f} ({acc1_meter.avg:.3f})\t'
                 f'Acc@5 {acc5_meter.val:.3f} ({acc5_meter.avg:.3f})\t'
                 f'mem {memory_used:.0f}MB')
+        
+        break
     epoch_time = time.time() - start
     logger.info(f"EPOCH {epoch} training takes {datetime.timedelta(seconds=int(epoch_time))}")
 
