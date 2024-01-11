@@ -8,7 +8,8 @@ from repvggplus import create_RepVGGplus_by_name
 
 
 resume_pth = "ckpt_dir/RepVGG-A0/QAT2/RepVGG-A0-train.pth"
-quant_resume_pth = "ckpt_dir/RepVGG-A0/QAT/ckpt_epoch_0.pth"
+# quant_resume_pth = "ckpt_dir/RepVGG-A0/QAT/ckpt_epoch_0.pth"
+quant_resume_pth = "ckpt_dir/RepVGG-A0/QAT0/ckpt_epoch_20.pth"
 arch = "RepVGG-A0"
 bins_num = 256
 

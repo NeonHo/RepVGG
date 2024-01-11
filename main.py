@@ -78,11 +78,11 @@ def main(config):
 
     logger.info(f"Creating model:{config.MODEL.ARCH}")
 
-    model = create_RepVGGplus_by_name(config.MODEL.ARCH, deploy=False, use_checkpoint=args.use_checkpoint)
+    fp_model = create_RepVGGplus_by_name(config.MODEL.ARCH, deploy=False, use_checkpoint=args.use_checkpoint)
     
 
-    logger.info(str(model))
-    model.cuda()
+    logger.info(str(fp_model))
+    fp_model.cuda()
     
     if config.TRAIN.AUTO_RESUME:
         resume_file = auto_resume_helper(config.OUTPUT)
@@ -97,11 +97,11 @@ def main(config):
             logger.info(f'no checkpoint found in {config.OUTPUT}, ignoring auto resume')
     
     if config.TRAIN.EMA_ALPHA > 0 and (not config.EVAL_MODE) and (not config.THROUGHPUT_MODE):
-        model_ema = copy.deepcopy(model)
+        fp_model_ema = copy.deepcopy(fp_model)
     else:
-        model_ema = None
+        fp_model_ema = None
     if (not config.THROUGHPUT_MODE) and config.MODEL.RESUME:
-        max_accuracy = load_checkpoint(config, model, logger)
+        max_accuracy = load_checkpoint(config, fp_model, logger)
 
         
     # for module in model.modules():
@@ -111,16 +111,17 @@ def main(config):
     # QAT
     quant_cfg = dict(
         global_wise_cfg=dict(
-            o_cfg=dict(calib_metric="minmax", dtype="int8", use_grad_scale=False), 
+            o_cfg=dict(calib_metric="minmax", dtype="int8", use_grad_scale=True), 
             # o_cfg=dict(calib_metric="percent-0.99999", dtype="int8"), 
             # o_cfg=dict(calib_metric="KL", dtype="int8", use_grad_scale=False), 
             freeze_bn=False,
-            w_cfg=dict(calib_metric="minmax", dtype="int8", use_grad_scale=False)
+            w_cfg=dict(calib_metric="minmax", dtype="int8", use_grad_scale=True)
+            # w_cfg=dict(calib_metric="minmax", dtype="int16", use_grad_scale=True)
             # w_cfg=dict(dtype="int8")
         )
     )
     
-    model = trace_model_for_qat(copy.deepcopy(model.train()), quant_cfg, domain="xh2")
+    model = trace_model_for_qat(copy.deepcopy(fp_model.train()), quant_cfg, domain="xh2")
     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(module=model)
     
     optimizer = build_optimizer(config, model)
@@ -172,11 +173,11 @@ def main(config):
     for epoch in range(config.TRAIN.START_EPOCH, config.TRAIN.EPOCHS):
         data_loader_train.sampler.set_epoch(epoch)
 
-        train_one_epoch(config, model, criterion, data_loader_train, optimizer, epoch, mixup_fn, lr_scheduler, model_ema=model_ema)
+        train_one_epoch(config, fp_model, model, criterion, data_loader_train, optimizer, epoch, mixup_fn, lr_scheduler, model_ema=fp_model_ema)
         if dist.get_rank() == 0:
-            save_latest(config, epoch, model_without_ddp, max_accuracy, optimizer, lr_scheduler, logger, model_ema=model_ema)
+            save_latest(config, epoch, model_without_ddp, max_accuracy, optimizer, lr_scheduler, logger, model_ema=fp_model_ema)
             if epoch % config.SAVE_FREQ == 0:
-                save_checkpoint(config, epoch, model_without_ddp, max_accuracy, optimizer, lr_scheduler, logger, model_ema=model_ema)
+                save_checkpoint(config, epoch, model_without_ddp, max_accuracy, optimizer, lr_scheduler, logger, model_ema=fp_model_ema)
 
         if epoch % config.SAVE_FREQ == 0:
 
@@ -187,29 +188,15 @@ def main(config):
                 logger.info(f'Max accuracy: {max_accuracy:.2f}%')
                 if max_accuracy == acc1 and dist.get_rank() == 0:
                     save_checkpoint(config, epoch, model_without_ddp, max_accuracy, optimizer, lr_scheduler, logger,
-                                    is_best=True, model_ema=model_ema)
+                                    is_best=True, model_ema=fp_model_ema)
 
-            if model_ema is not None:
-                if data_loader_val is not None:
-                    acc1, acc5, loss = validate(config, data_loader_val, model_ema)
-                    logger.info(f"EMAAccuracy of the network at epoch {epoch} test images: {acc1:.3f}%")
-                    max_ema_accuracy = max(max_ema_accuracy, acc1)
-                    logger.info(f'EMAMax accuracy: {max_ema_accuracy:.2f}%')
-                    if max_ema_accuracy == acc1 and dist.get_rank() == 0:
-                        best_ema_path = os.path.join(config.OUTPUT, 'best_ema.pth')
-                        logger.info(f"{best_ema_path} best EMA saving......")
-                        torch.save(unwrap_model(model_ema).state_dict(), best_ema_path)
-                else:
-                    latest_ema_path = os.path.join(config.OUTPUT, 'latest_ema.pth')
-                    logger.info(f"{latest_ema_path} latest EMA saving......")
-                    torch.save(unwrap_model(model_ema).state_dict(), latest_ema_path)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     logger.info('Training time {}'.format(total_time_str))
 
 
-def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mixup_fn, lr_scheduler, model_ema=None):
+def train_one_epoch(config, fp_model, model, criterion, data_loader, optimizer, epoch, mixup_fn, lr_scheduler, model_ema=None):
     model.train()
     optimizer.zero_grad()
 
@@ -220,6 +207,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
     acc1_meter = AverageMeter()
     acc5_meter = AverageMeter()
     stage0_weight_mse = AverageMeter()
+    stage0_w_quantizer_scale = AverageMeter()
 
     start = time.time()
     end = time.time()
@@ -285,7 +273,9 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
             lr_scheduler.step_update(epoch * num_steps + idx)
 
         torch.cuda.synchronize()
-
+        stage0_w_quantizer_scale.update(model.module.stage0.w_quantizer.scale.data.sum())
+        stage0_weight_mse.update(torch.nn.functional.mse_loss(fp_model.stage0.rbr_dense.conv.weight.data, model.module.stage0.rbr_dense.conv.weight.data))
+        
         loss_meter.update(loss.item(), targets.size(0))
         norm_meter.update(grad_norm)
         acc1_meter.update(acc1.item(), targets.size(0))
@@ -304,12 +294,15 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
             logger.info(
                 f'Train: [{epoch}/{config.TRAIN.EPOCHS}][{idx}/{num_steps}]\t'
                 f'eta {datetime.timedelta(seconds=int(etas))} lr {lr:.6f}\t'
-                f'time {batch_time.val:.4f} ({batch_time.avg:.4f})\t'
+                # f'time {batch_time.val:.4f} ({batch_time.avg:.4f})\t'
                 f'loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t'
                 f'grad_norm {norm_meter.val:.4f} ({norm_meter.avg:.4f})\t'
                 f'Acc@1 {acc1_meter.val:.3f} ({acc1_meter.avg:.3f})\t'
                 f'Acc@5 {acc5_meter.val:.3f} ({acc5_meter.avg:.3f})\t'
-                f'mem {memory_used:.0f}MB')
+                # f'mem {memory_used:.0f}MB'
+                f'w_mse {stage0_weight_mse.val:.10f}\t'
+                f'w_scale {stage0_w_quantizer_scale.val:.4f}\t'
+            )
         
         # break
     epoch_time = time.time() - start
