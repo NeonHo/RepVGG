@@ -119,7 +119,7 @@ def unwrap_model(model):
     return model.module if wrapped else model
 
 
-def load_checkpoint(config, model, optimizer, lr_scheduler, logger, model_ema=None):
+def load_checkpoint(config, model, logger):
     logger.info(f"==============> Resuming form {config.MODEL.RESUME}....................")
     if config.MODEL.RESUME.startswith('https'):
         checkpoint = torch.hub.load_state_dict_from_url(

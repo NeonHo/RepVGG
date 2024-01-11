@@ -79,7 +79,7 @@ def main(config):
     logger.info(f"Creating model:{config.MODEL.ARCH}")
 
     model = create_RepVGGplus_by_name(config.MODEL.ARCH, deploy=False, use_checkpoint=args.use_checkpoint)
-    optimizer = build_optimizer(config, model)
+    
 
     logger.info(str(model))
     model.cuda()
@@ -95,14 +95,14 @@ def main(config):
             logger.info(f'auto resuming from {resume_file}')
         else:
             logger.info(f'no checkpoint found in {config.OUTPUT}, ignoring auto resume')
-
-    lr_scheduler = build_scheduler(config, optimizer, len(data_loader_train))
+    
     if config.TRAIN.EMA_ALPHA > 0 and (not config.EVAL_MODE) and (not config.THROUGHPUT_MODE):
         model_ema = copy.deepcopy(model)
     else:
         model_ema = None
     if (not config.THROUGHPUT_MODE) and config.MODEL.RESUME:
-        max_accuracy = load_checkpoint(config, model, optimizer, lr_scheduler, logger, model_ema=model_ema)
+        max_accuracy = load_checkpoint(config, model, logger)
+
         
     # for module in model.modules():
     #     if hasattr(module, 'switch_to_deploy'):
@@ -119,8 +119,12 @@ def main(config):
             # w_cfg=dict(dtype="int8")
         )
     )
+    
     model = trace_model_for_qat(copy.deepcopy(model.train()), quant_cfg, domain="xh2")
     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(module=model)
+    
+    optimizer = build_optimizer(config, model)
+    lr_scheduler = build_scheduler(config, optimizer, len(data_loader_train))
     
     if torch.cuda.device_count() > 1:
         if config.AMP_OPT_LEVEL != "O0":
@@ -215,6 +219,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
     norm_meter = AverageMeter()
     acc1_meter = AverageMeter()
     acc5_meter = AverageMeter()
+    stage0_weight_mse = AverageMeter()
 
     start = time.time()
     end = time.time()
@@ -306,7 +311,7 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
                 f'Acc@5 {acc5_meter.val:.3f} ({acc5_meter.avg:.3f})\t'
                 f'mem {memory_used:.0f}MB')
         
-        break
+        # break
     epoch_time = time.time() - start
     logger.info(f"EPOCH {epoch} training takes {datetime.timedelta(seconds=int(epoch_time))}")
 
