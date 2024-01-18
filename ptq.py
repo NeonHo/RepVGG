@@ -17,11 +17,15 @@ from train.config import get_config
 from data import build_loader
 from train.lr_scheduler import build_scheduler
 from train.logger import create_logger
-from utils import load_checkpoint, load_weights, save_checkpoint, get_grad_norm, auto_resume_helper, reduce_tensor, save_latest, update_model_ema, unwrap_model
+from utils import load_checkpoint, load_weights, save_checkpoint, get_grad_norm, auto_resume_helper, reduce_tensor, update_model_ema, unwrap_model
 import copy
 from train.optimizer import build_optimizer
 from repvggplus import create_RepVGGplus_by_name
-from hmquant.qat_torch.apis import trace_model_for_qat
+from hmquant.qat_torch.apis import trace_model_for_qat, set_calib, set_fake_quant
+from repvgg import RepVGGBlock
+from hmquant.observers.utils import pure_diff
+from rich.table import Table
+from rich.console import Console
 
 try:
     # noinspection PyUnresolvedReferences
@@ -69,10 +73,6 @@ def parse_option():
 
     return args, config
 
-
-
-
-
 def main(config):
     dataset_train, dataset_val, data_loader_train, data_loader_val, mixup_fn = build_loader(config)
 
@@ -104,18 +104,15 @@ def main(config):
         max_accuracy = load_checkpoint(config, fp_model, logger)
 
         
-    # for module in model.modules():
-    #     if hasattr(module, 'switch_to_deploy'):
-    #         module.switch_to_deploy()
-
     # QAT
     quant_cfg = dict(
         global_wise_cfg=dict(
-            o_cfg=dict(calib_metric="minmax", dtype="int8", use_grad_scale=False, symmetric=False), 
+            o_cfg=dict(calib_metric="minmax", dtype="int8", use_grad_scale=True, symmetric=False), 
             # o_cfg=dict(calib_metric="percent-0.99999", dtype="int8"), 
             # o_cfg=dict(calib_metric="KL", dtype="int8", use_grad_scale=True), 
-            freeze_bn=False,
-            w_cfg=dict(calib_metric="minmax", dtype="int8", use_grad_scale=False)
+            # freeze_bn=False,
+            freeze_bn=True,
+            w_cfg=dict(calib_metric="minmax", dtype="int8", use_grad_scale=True)
             # w_cfg=dict(calib_metric="minmax", dtype="int16", use_grad_scale=True)
             # w_cfg=dict(dtype="int8")
         )
@@ -144,175 +141,55 @@ def main(config):
         flops = model_without_ddp.flops()
         logger.info(f"number of GFLOPs: {flops / 1e9}")
 
-    if config.THROUGHPUT_MODE:
-        throughput(data_loader_val, model, logger)
-        return
-
-    if config.EVAL_MODE:
-        load_weights(model, config.MODEL.RESUME)
-        acc1, acc5, loss = validate(config, data_loader_val, model)
-        logger.info(f"Only eval. top-1 acc, top-5 acc, loss: {acc1:.3f}, {acc5:.3f}, {loss:.5f}")
-        return
-
-
-    if config.AUG.MIXUP > 0.:
-        # smoothing is handled with mixup label transform
-        criterion = SoftTargetCrossEntropy()
-    elif config.MODEL.LABEL_SMOOTHING > 0.:
-        criterion = LabelSmoothingCrossEntropy(smoothing=config.MODEL.LABEL_SMOOTHING)
-    else:
-        criterion = torch.nn.CrossEntropyLoss()
-
     max_accuracy = 0.0
-    max_ema_accuracy = 0.0
-
-
 
     logger.info("Start training")
     start_time = time.time()
     for epoch in range(config.TRAIN.START_EPOCH, config.TRAIN.EPOCHS):
         data_loader_train.sampler.set_epoch(epoch)
-
-        train_one_epoch(config, fp_model, model, criterion, data_loader_train, optimizer, epoch, mixup_fn, lr_scheduler, model_ema=fp_model_ema)
+        calib_one_epoch(model=model, data_loader=data_loader_train)
+        print("start val")
         if dist.get_rank() == 0:
-            save_latest(config, epoch, model_without_ddp, max_accuracy, optimizer, lr_scheduler, logger, model_ema=fp_model_ema)
             if epoch % config.SAVE_FREQ == 0:
                 save_checkpoint(config, epoch, model_without_ddp, max_accuracy, optimizer, lr_scheduler, logger, model_ema=fp_model_ema)
 
         if epoch % config.SAVE_FREQ == 0:
 
             if data_loader_val is not None:
-                acc1, acc5, loss = validate(config, data_loader_val, model)
+                acc1, acc5, loss = validate(config, data_loader_val, model, fp_model)
                 logger.info(f"Accuracy of the network at epoch {epoch}: {acc1:.3f}%")
                 max_accuracy = max(max_accuracy, acc1)
                 logger.info(f'Max accuracy: {max_accuracy:.2f}%')
                 if max_accuracy == acc1 and dist.get_rank() == 0:
                     save_checkpoint(config, epoch, model_without_ddp, max_accuracy, optimizer, lr_scheduler, logger,
                                     is_best=True, model_ema=fp_model_ema)
-
-
+                    
+        break
+    
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     logger.info('Training time {}'.format(total_time_str))
 
-
-def train_one_epoch(config, fp_model, model, criterion, data_loader, optimizer, epoch, mixup_fn, lr_scheduler, model_ema=None):
-    model.train()
-    optimizer.zero_grad()
-
-    num_steps = len(data_loader)
-    batch_time = AverageMeter()
-    loss_meter = AverageMeter()
-    norm_meter = AverageMeter()
-    acc1_meter = AverageMeter()
-    acc5_meter = AverageMeter()
-    stage0_weight_mse = AverageMeter()
-    stage0_w_quantizer_scale = AverageMeter()
-
-    start = time.time()
-    end = time.time()
+@torch.no_grad()
+def calib_one_epoch(model, data_loader):
+    set_calib(model=model)
+    print("calibrating")
+    model.eval()
     for idx, (samples, targets) in enumerate(data_loader):
         samples = samples.cuda(non_blocking=True)
         targets = targets.cuda(non_blocking=True)
-
-        if mixup_fn is not None:
-            samples, targets = mixup_fn(samples, targets)
-
+        
         outputs = model(samples)
-
-        if type(outputs) is dict:
-            loss = 0.0
-            for name, pred in outputs.items():
-                if 'aux' in name:
-                    loss += 0.1 * criterion(pred, targets)
-                else:
-                    loss += criterion(pred, targets)
-        else:
-            loss = criterion(outputs, targets)
-            
-        acc1, acc5 = accuracy(outputs, targets, topk=(1, 5))
-
-        if config.TRAIN.ACCUMULATION_STEPS > 1:
-
-            loss = loss / config.TRAIN.ACCUMULATION_STEPS
-            if config.AMP_OPT_LEVEL != "O0":
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward()
-                if config.TRAIN.CLIP_GRAD:
-                    grad_norm = torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), config.TRAIN.CLIP_GRAD)
-                else:
-                    grad_norm = get_grad_norm(amp.master_params(optimizer))
-            else:
-                loss.backward()
-                if config.TRAIN.CLIP_GRAD:
-                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.TRAIN.CLIP_GRAD)
-                else:
-                    grad_norm = get_grad_norm(model.parameters())
-            if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
-                optimizer.step()
-                optimizer.zero_grad()
-                lr_scheduler.step_update(epoch * num_steps + idx)
-
-        else:
-
-            optimizer.zero_grad()
-            if config.AMP_OPT_LEVEL != "O0":
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward()
-                if config.TRAIN.CLIP_GRAD:
-                    grad_norm = torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), config.TRAIN.CLIP_GRAD)
-                else:
-                    grad_norm = get_grad_norm(amp.master_params(optimizer))
-            else:
-                loss.backward()
-                if config.TRAIN.CLIP_GRAD:
-                    grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.TRAIN.CLIP_GRAD)
-                else:
-                    grad_norm = get_grad_norm(model.parameters())
-            optimizer.step()
-            lr_scheduler.step_update(epoch * num_steps + idx)
-
-        torch.cuda.synchronize()
-        stage0_w_quantizer_scale.update(model.module.stage0.w_quantizer.scale.data.sum())
-        stage0_weight_mse.update(torch.nn.functional.mse_loss(fp_model.stage0.rbr_dense.conv.weight.data, model.module.stage0.rbr_dense.conv.weight.data))
-        
-        loss_meter.update(loss.item(), targets.size(0))
-        norm_meter.update(grad_norm)
-        acc1_meter.update(acc1.item(), targets.size(0))
-        acc5_meter.update(acc5.item(), targets.size(0))
-        batch_time.update(time.time() - end)
-
-        if model_ema is not None:
-            update_model_ema(config, dist.get_world_size(), model=model, model_ema=model_ema, cur_epoch=epoch, cur_iter=idx)
-
-        end = time.time()
-
-        if idx % config.PRINT_FREQ == 0:
-            lr = optimizer.param_groups[0]['lr']
-            memory_used = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
-            etas = batch_time.avg * (num_steps - idx)
-            logger.info(
-                f'Train: [{epoch}/{config.TRAIN.EPOCHS}][{idx}/{num_steps}]\t'
-                f'eta {datetime.timedelta(seconds=int(etas))} lr {lr:.6f}\t'
-                # f'time {batch_time.val:.4f} ({batch_time.avg:.4f})\t'
-                f'loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t'
-                f'grad_norm {norm_meter.val:.4f} ({norm_meter.avg:.4f})\t'
-                f'Acc@1 {acc1_meter.val:.3f} ({acc1_meter.avg:.3f})\t'
-                f'Acc@5 {acc5_meter.val:.3f} ({acc5_meter.avg:.3f})\t'
-                # f'mem {memory_used:.0f}MB'
-                f'w_mse {stage0_weight_mse.val:.10f}\t'
-                f'w_scale {stage0_w_quantizer_scale.val:.4f}\t'
-            )
-        
-        # break
-    epoch_time = time.time() - start
-    logger.info(f"EPOCH {epoch} training takes {datetime.timedelta(seconds=int(epoch_time))}")
-
+        break
+    set_fake_quant(model=model)
+    model.train()
+    torch.cuda.synchronize()
 
 @torch.no_grad()
-def validate(config, data_loader, model):
+def validate(config, data_loader, model, fp_model):
     criterion = torch.nn.CrossEntropyLoss()
     model.eval()
+    fp_model.eval()
 
     batch_time = AverageMeter()
     loss_meter = AverageMeter()
@@ -320,13 +197,33 @@ def validate(config, data_loader, model):
     acc5_meter = AverageMeter()
 
     end = time.time()
+    quant_model_dict = dict(model.module.named_modules())
+    val_mean_ab_tensor, val_mean_re_tensor, val_related_mse, val_cos = {}, {}, {}, {}
+    count = 0.0
     for idx, (images, target) in enumerate(data_loader):
         images = images.cuda(non_blocking=True)
         target = target.cuda(non_blocking=True)
 
         # compute output
         output = model(images)
-
+        
+        previous_key = "input"
+        fp_block_ouputs = {"input": images}
+        quant_block_ouputs = {"input": images}
+        for key, fp_module in fp_model.named_modules():
+            if isinstance(fp_module, RepVGGBlock):
+                # print(key)
+                fp_block_ouputs[key] = fp_module(fp_block_ouputs[previous_key])
+                quant_block_ouputs[key] = quant_model_dict[key](quant_block_ouputs[previous_key])
+                del fp_block_ouputs[previous_key]
+                del quant_block_ouputs[previous_key]
+                mean_ab_tensor, mean_re_tensor, related_mse, cos = pure_diff(raw_tensor=fp_block_ouputs[key], quanted_tensor=quant_block_ouputs[key])
+                previous_key = key
+                val_mean_ab_tensor[key] = val_mean_ab_tensor.get(key, 0.0) + mean_ab_tensor
+                val_mean_re_tensor[key] = val_mean_re_tensor.get(key, 0.0) + mean_re_tensor
+                val_related_mse[key] = val_related_mse.get(key, 0.0) + related_mse
+                val_cos[key] = val_cos.get(key, 0.0) + cos
+    
         #   =============================== deepsup part
         if type(output) is dict:
             output = output['main']
@@ -356,30 +253,43 @@ def validate(config, data_loader, model):
                 f'Acc@1 {acc1_meter.val:.3f} ({acc1_meter.avg:.3f})\t'
                 f'Acc@5 {acc5_meter.val:.3f} ({acc5_meter.avg:.3f})\t'
                 f'Mem {memory_used:.0f}MB')
+        
+        count += 1.0
+        
     logger.info(f' * Acc@1 {acc1_meter.avg:.3f} Acc@5 {acc5_meter.avg:.3f}')
+    
+    activation_error_record_ops_dict = {}
+    for k in val_mean_ab_tensor.keys():
+        val_mean_ab_tensor[k] /= count
+        val_mean_re_tensor[k] /= count
+        val_related_mse[k] /= count
+        val_cos[k] /= count
+        activation_error_record_ops_dict[k] = {}
+        activation_error_record_ops_dict[k]["w/a"] = "activation"
+        activation_error_record_ops_dict[k]["mean L1 Error"] = str(val_mean_ab_tensor[k].item())
+        activation_error_record_ops_dict[k]["mean related L1 Error"] = str(val_mean_re_tensor[k].item())
+        activation_error_record_ops_dict[k]["related mse"] = str(val_related_mse[k].item())
+        activation_error_record_ops_dict[k]["cosine dist"] = str(val_cos[k].item())
+    
+    table = Table(title="Sequencer Analyse Report -- activation")
+    table.add_column("Module")
+    table_data = []
+    for node_key, node_metric_dict in activation_error_record_ops_dict.items():
+        node_key_list = [node_key]
+        for metric_value in node_metric_dict.values():
+            node_key_list.append(metric_value)
+        table_data.append(node_key_list)
+    for metric_key in activation_error_record_ops_dict[next(iter(activation_error_record_ops_dict))].keys():
+        table.add_column(metric_key)
+    for row in table_data:
+        table.add_row(*row)
+        
+    console = Console(record=True)
+    console.print(table)
+    
     return acc1_meter.avg, acc5_meter.avg, loss_meter.avg
 
 
-@torch.no_grad()
-def throughput(data_loader, model, logger):
-    model.eval()
-
-    for idx, (images, _) in enumerate(data_loader):
-        images = images.cuda(non_blocking=True)
-
-        batch_size = images.shape[0]
-        for i in range(50):
-            model(images)
-        torch.cuda.synchronize()
-        logger.info(f"throughput averaged with 30 times")
-        tic1 = time.time()
-        for i in range(30):
-            model(images)
-        torch.cuda.synchronize()
-        tic2 = time.time()
-        throughput = 30 * batch_size / (tic2 - tic1)
-        logger.info(f"batch_size {batch_size} throughput {throughput}")
-        return
 
 
 import os

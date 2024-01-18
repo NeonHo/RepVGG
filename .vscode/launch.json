@@ -6,8 +6,11 @@
     "configurations": [
         {
             "name": "Python: Current File",
-            "type": "python",
+            "type": "debugpy",
             "request": "launch",
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "2,3"
+            },
             "program": "${file}",
             // "program": "/data01/user/hening/softwares/anaconda3/envs/neon_pytorch/lib/python3.8/site-packages/torch/distributed/launch.py",
             "console": "integratedTerminal",
@@ -15,26 +18,27 @@
             "args": [
                 // "--nproc_per_node", "1",
                 // "--master_port", "12349",
-                // "main.py",
+                // // "main.py",
+                // "ptq.py",
                 // "--arch", "RepVGG-A0",
                 // "--data-path", "datasets",
                 // "--batch-size", "256",
                 // "--tag", "QAT",
-                // // "--use_checkpoint",
                 // "--output", "ckpt_dir",
                 // "--opts", 
                 // "TRAIN.AUTO_RESUME", "True",
-                // "TRAIN.EPOCHS", "50",
-                // "TRAIN.BASE_LR", "1e-4",
-                // "TRAIN.OPTIMIZER.NAME", "adam",
+                // "TRAIN.EPOCHS", "120",
+                // "TRAIN.BASE_LR", "0.01",
+                // "TRAIN.OPTIMIZER.NAME", "sgd",
                 // "TRAIN.WEIGHT_DECAY", "1e-4",
-                // "TRAIN.WARMUP_EPOCHS", "1",
-                // "MODEL.LABEL_SMOOTHING", "0.1",
+                // "TRAIN.WARMUP_EPOCHS", "5",
+                // "MODEL.LABEL_SMOOTHING", "0.01",
                 // "AUG.PRESET", "weak",
                 // "AUG.MIXUP", "0.0",
                 // "DATA.DATASET", "imagenet",
                 // "DATA.IMG_SIZE", "224",
-                // "TRAIN.CLIP_GRAD", "5.0"
+                // "PRINT_FREQ", "1"
+                // // "TRAIN.CLIP_GRAD", "5.0"
             ]
         }
     ]

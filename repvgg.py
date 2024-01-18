@@ -175,9 +175,6 @@ class RepVGGBlock(nn.Module):
         else:
             return rbr_dense_weight + self._pad_1x1_to_3x3_tensor(rbr_1x1_weight), rbr_dense_bias + rbr_1x1_bias
 
-def BNEst_func(x: torch.Tensor, conv: nn.Module):
-    pass
-
 @torch.no_grad()
 def BN_func(x: torch.Tensor, module: nn.Module):
     module(x)
